@@ -1,0 +1,272 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+
+/* ================= IR SENSOR ================= */
+#define IR_SENSOR_PIN 2  // GPIO2 for IR sensor
+// IR sensor outputs:
+// HIGH (1) = No object detected
+// LOW (0) = Object detected
+
+/* ================= WIFI DETAILS ================= */
+const char* ssid = "Yourssid";
+const char* password = "Password";
+
+/* ================= EMAIL API DETAILS ================= */
+const char* host = "www.circuitdigest.cloud";
+const int port = 443;
+const char* apiKey = "yourapikey";
+const char* toEmail = "yourregismailid";
+const int templateID = 1001;
+
+/* ================= SETTINGS ================= */
+const unsigned long READ_INTERVAL = 500;      // Check every 500ms for faster detection
+const unsigned long RETRY_DELAY = 10000;      // 10 seconds between emails
+const unsigned long DETECTION_DURATION = 2000; // Object must be detected for 2 seconds
+
+/* ================= FLAGS AND COUNTERS ================= */
+bool emailSent = false;
+bool objectDetected = false;
+unsigned long lastReadTime = 0;
+unsigned long lastEmailAttempt = 0;
+unsigned long detectionStartTime = 0;
+int detectionCount = 0;
+int totalDetections = 0;
+
+/* ================= SEND EMAIL ================= */
+bool sendEmail(int detections) {
+  WiFiClientSecure client;
+  
+  Serial.println("\n📧 Connecting to server...");
+  
+  // Disable SSL certificate verification (for development)
+  client.setInsecure();
+  
+  if (!client.connect(host, port)) {
+    Serial.println("❌ HTTPS connection failed");
+    return false;
+  }
+
+  /* -------- BUILD COMPLETE JSON PAYLOAD -------- */
+  char payload[512];
+  char timestamp[32];
+  
+  // Get current time (millis since boot)
+  unsigned long currentTime = millis() / 1000; // Convert to seconds
+  snprintf(timestamp, sizeof(timestamp), "%lu seconds", currentTime);
+  
+  snprintf(payload, sizeof(payload),
+    "{"
+    "\"to_email\":\"%s\","
+    "\"template_id\":%d,"
+    "\"variables\":{"
+      "\"subject\":\"Motion Alert from IR Sensor\","
+      "\"title\":\"Object Detected!\","
+      "\"description\":\"Your IR sensor detected an object in the monitoring area.\","
+      "\"var1\":\"Detection Count\","
+      "\"var2\":\"%d detection(s) | Runtime: %s\""
+    "}}",
+    toEmail,
+    templateID,
+    detections,
+    timestamp
+  );
+
+  /* -------- SEND HTTP REQUEST -------- */
+  client.println("POST /api/v1/email/send HTTP/1.1");
+  client.print("Host: "); client.println(host);
+  client.print("Authorization: "); client.println(apiKey);
+  client.println("Content-Type: application/json");
+  client.print("Content-Length: "); client.println(strlen(payload));
+  client.println("Connection: close");
+  client.println();
+  client.println(payload);
+
+  /* -------- DEBUG: Print payload -------- */
+  Serial.println("📤 Sending payload:");
+  Serial.println(payload);
+
+  /* -------- WAIT FOR RESPONSE -------- */
+  unsigned long timeout = millis();
+  while (!client.available()) {
+    if (millis() - timeout > 10000) {
+      Serial.println("❌ Server timeout");
+      client.stop();
+      return false;
+    }
+  }
+
+  /* -------- READ AND PARSE RESPONSE -------- */
+  bool success = false;
+  Serial.println("\n📨 Server response:");
+  
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    Serial.println(line);
+    
+    // Check for success indicators
+    if (line.indexOf("200 OK") >= 0 || line.indexOf("\"success\":true") >= 0) {
+      success = true;
+    }
+  }
+
+  client.stop();
+  
+  if (success) {
+    Serial.println("\n✅ Email sent successfully!");
+  } else {
+    Serial.println("\n⚠️ Email may have failed - check response above");
+  }
+  
+  return success;
+}
+
+/* ================= SETUP ================= */
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  Serial.println("\n╔════════════════════════════════════════╗");
+  Serial.println("║    IR Motion Detection Alert System   ║");
+  Serial.println("║         Raspberry Pi Pico W           ║");
+  Serial.println("╚════════════════════════════════════════╝\n");
+  
+  // Initialize IR sensor pin
+  pinMode(IR_SENSOR_PIN, INPUT);
+  Serial.println("🔴 Initializing IR sensor...");
+  delay(500);
+  
+  // Test IR sensor
+  int initialState = digitalRead(IR_SENSOR_PIN);
+  Serial.print("✅ IR sensor ready - Current state: ");
+  Serial.println(initialState == HIGH ? "No object" : "Object detected");
+  Serial.println();
+
+  // Connect to WiFi
+  Serial.println("📡 Connecting to WiFi...");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  Serial.println();
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("✅ WiFi connected successfully!");
+    Serial.print("📍 IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("📶 Signal Strength: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+  } else {
+    Serial.println("❌ WiFi connection failed!");
+    Serial.println("⚠️  System will continue trying to reconnect...");
+  }
+  
+  Serial.println("\n╔════════════════════════════════════════╗");
+  Serial.println("║         Monitoring Started            ║");
+  Serial.println("╚════════════════════════════════════════╝");
+  Serial.print("⏱️  Check Interval: ");
+  Serial.print(READ_INTERVAL);
+  Serial.println(" ms");
+  Serial.print("🎯 Detection Duration: ");
+  Serial.print(DETECTION_DURATION / 1000);
+  Serial.println(" seconds\n");
+  
+  Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+  Serial.println("👁️  Waiting for motion...\n");
+}
+
+/* ================= LOOP ================= */
+void loop() {
+  unsigned long currentMillis = millis();
+  
+  // Non-blocking delay for sensor readings
+  if (currentMillis - lastReadTime < READ_INTERVAL) {
+    return;
+  }
+  lastReadTime = currentMillis;
+
+  /* -------- CHECK WIFI CONNECTION -------- */
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️  WiFi disconnected - attempting reconnect...");
+    WiFi.begin(ssid, password);
+    delay(5000);
+    return;
+  }
+
+  /* -------- READ IR SENSOR -------- */
+  int sensorState = digitalRead(IR_SENSOR_PIN);
+  
+  // IR sensor logic: LOW = object detected, HIGH = no object
+  bool currentDetection = (sensorState == LOW);
+
+  /* -------- OBJECT DETECTION LOGIC -------- */
+  if (currentDetection) {
+    // Object is detected
+    if (!objectDetected) {
+      // First detection - start timer
+      objectDetected = true;
+      detectionStartTime = currentMillis;
+      detectionCount++;
+      totalDetections++;
+      
+      Serial.println("🔴 OBJECT DETECTED!");
+      Serial.print("   └─> Detection #");
+      Serial.println(totalDetections);
+    }
+    
+    // Check if object has been detected for required duration
+    unsigned long detectionDuration = currentMillis - detectionStartTime;
+    
+    Serial.print("🔴 Object present for: ");
+    Serial.print(detectionDuration / 1000.0, 1);
+    Serial.print(" sec  |  Total detections: ");
+    Serial.println(totalDetections);
+    
+    // Send email if detection duration reached and email not sent yet
+    if (detectionDuration >= DETECTION_DURATION && !emailSent) {
+      if (currentMillis - lastEmailAttempt > RETRY_DELAY) {
+        Serial.println("\n   └─> Sustained detection - sending email alert...");
+        
+        lastEmailAttempt = currentMillis;
+        
+        if (sendEmail(totalDetections)) {
+          emailSent = true;
+          Serial.println("   └─> ✅ Alert email delivered");
+        } else {
+          Serial.println("   └─> ⚠️  Email delivery failed, will retry");
+        }
+      }
+    }
+    
+  } else {
+    // No object detected
+    if (objectDetected) {
+      // Object just left
+      unsigned long detectionDuration = currentMillis - detectionStartTime;
+      Serial.println("✅ Object cleared");
+      Serial.print("   └─> Detection lasted: ");
+      Serial.print(detectionDuration / 1000.0, 1);
+      Serial.println(" seconds\n");
+      
+      objectDetected = false;
+      emailSent = false;  // Reset email flag when object clears
+    }
+    
+    // Only print status occasionally (every 2 seconds) when no object
+    static unsigned long lastStatusPrint = 0;
+    if (currentMillis - lastStatusPrint > 2000) {
+      Serial.print("✅ Monitoring active  |  Total detections: ");
+      Serial.println(totalDetections);
+      lastStatusPrint = currentMillis;
+    }
+  }
+}
