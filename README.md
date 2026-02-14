@@ -41,7 +41,7 @@ This creates a reliable Pico W email notification system.
 
 | IR Sensor Pin | Pico W Connection |
 |--------------|-------------------|
-| VCC | 3.3V |
+| VCC | Vbus |
 | GND | GND |
 | OUT | GPIO 2 |
 
